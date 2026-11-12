@@ -16,8 +16,7 @@ permissions:
 
 jobs:
   ci:
-    # if: github.event_name == 'pull_request'
-    if: github.event_name == 'push'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout pull request merge commit
@@ -73,8 +72,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
   cd:
-    # if: github.event_name == 'push'
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'push'
 
     runs-on: ubuntu-latest
     concurrency:
@@ -108,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           image="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_SHA"
-          docker build -f Docker-files/app/Dockerfile -t "$image" .
+          docker build --provenance=false -f Docker-files/app/Dockerfile -t "$image" .
           docker push "$image"
           echo "ecr_image=$ECR_REGISTRY/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
 
