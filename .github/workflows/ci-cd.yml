@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   ci:
-    if: github.event_name == 'pull_request'
+    # if: github.event_name == 'pull_request'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout pull request merge commit
@@ -72,24 +73,26 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
   cd:
-    if: github.event_name == 'push'
+    # if: github.event_name == 'push'
+    if: github.event_name == 'pull_request'
+
     runs-on: ubuntu-latest
     concurrency:
       group: cd-${{ github.repository }}-${{ vars.AWS_REGION }}
       cancel-in-progress: false
     permissions:
-      contents: read
-      id-token: write
+      contents: write
     steps:
       - name: Checkout application
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 1  # git history is now only the last commit
 
-      - name: Configure AWS credentials with OIDC
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to Amazon ECR
