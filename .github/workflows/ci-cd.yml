@@ -115,7 +115,7 @@ jobs:
       - name: Checkout GitOps repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ vars.HELM_REPO_NAME }}
+          repository: ${{ vars.HELM_REPO_USER }} / ${{ vars.HELM_REPO_NAME }}
           token: ${{ secrets.GITOPS_PAT }}
           path: gitops
           ref: main
