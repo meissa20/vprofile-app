@@ -1,0 +1,147 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }} # CI/CD-pull_request-main or CI/CD-push-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  ci:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pull request merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Java and Maven cache
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build, test, Checkstyle, and JaCoCo
+        run: mvn --batch-mode --no-transfer-progress clean verify  # run in batch mode to avoid interactive prompts and disable installation dependencies logs to reduce log noise
+
+      - name: Verify analysis reports
+        run: |
+          test -f target/checkstyle-result.xml
+          test -f target/site/jacoco/jacoco.xml
+
+      - name: Run SonarScanner CLI
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }} # Which Pull Request is this?
+          PR_BASE: ${{ github.base_ref }} # Where are the proposed changes coming from?
+          PR_HEAD: ${{ github.event.pull_request.head.ref }} # What is the target branch for the proposed changes?
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }} # What is the commit SHA of the proposed changes?
+        run: |
+          set -euo pipefail
+          scanner_version=7.2.0.5079
+
+          curl -fsSLo /tmp/sonar-scanner.zip \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${scanner_version}-linux-x64.zip"
+
+          unzip -q /tmp/sonar-scanner.zip -d /tmp
+
+          export PATH="/tmp/sonar-scanner-${scanner_version}-linux-x64/bin:$PATH"
+
+          sonar-scanner --version
+          sonar-scanner \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.token="$SONAR_TOKEN" \
+
+      - name: SonarQube quality gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 10
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  cd:
+    if: github.event_name == 'push'
+
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cd-${{ github.repository }}-${{ vars.AWS_REGION }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout application
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # git history is now only the last commit
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push application image
+        id: build-and-push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_SHA"
+          docker build --provenance=false -f Docker-files/app/Dockerfile -t "$image" .
+          docker push "$image"
+          echo "ecr_image=$ECR_REGISTRY/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.HELM_REPO_USER }}/${{ vars.HELM_REPO_NAME }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops
+          ref: main
+          fetch-depth: 1
+
+      - name: Install Mike Farah yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64 -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+
+      - name: Update Helm values with yq
+        env:
+          IMAGE_REPOSITORY: ${{ steps.build-and-push.outputs.ecr_image }}
+          IMAGE_TAG: ${{ github.sha }}
+          VALUES_FILE: gitops/chart/values.yml
+        run: yq -i '.application.image.repository = strenv(IMAGE_REPOSITORY) | .application.image.tag = strenv(IMAGE_TAG)' "$VALUES_FILE"
+
+      - name: Commit and push Helm values
+        env:
+          HELM_REPO_USER: ${{ secrets.HELM_REPO_USER }}
+        working-directory: gitops
+        run: |
+          git config user.name "$HELM_REPO_USER"
+          git config user.email "${HELM_REPO_USER}@users.noreply.github.com"
+          git add chart/values.yml
+          if git diff --cached --quiet; then
+            echo "Helm values are already up to date."
+            exit 0
+          fi
+          git commit -m "Deploy application image ${GITHUB_SHA}"
+          git push origin main
